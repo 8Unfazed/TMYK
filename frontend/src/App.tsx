@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import { ArrowRight, Check, Clipboard, Crown, Eye, LoaderCircle, LockKeyhole, RefreshCw, Sparkles, Users, X } from 'lucide-react';
-import { downloadResults, getToken, request, setToken } from './api';
+import { downloadResults, getSocketUrl, getToken, request, setToken } from './api';
 import { Description, GameState, Player } from './types';
 
 type RoomResponse = { token: string; state: GameState };
@@ -41,7 +41,14 @@ function useGame() {
   useEffect(() => {
     if (!getToken()) return;
     void refresh();
-    const socket: Socket = io('/', { auth: { token: getToken() }, reconnection: true });
+    let socket: Socket;
+    try {
+      socket = io(getSocketUrl(), { auth: { token: getToken() }, reconnection: true });
+    } catch (err) {
+      setSocketStatus('offline');
+      setError(err instanceof Error ? err.message : 'Production API is not configured.');
+      return;
+    }
     socket.on('connect', () => setSocketStatus('connected'));
     socket.on('disconnect', () => setSocketStatus('offline'));
     socket.on('connect_error', () => setSocketStatus('offline'));

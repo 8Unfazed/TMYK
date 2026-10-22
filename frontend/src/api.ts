@@ -1,5 +1,21 @@
-const API = '/api';
+const API_ORIGIN = import.meta.env.VITE_API_URL?.trim().replace(/\/+$/, '') ?? '';
+const API = `${API_ORIGIN}/api`;
 const TOKEN_KEY = 'fourfold.session';
+
+function apiUrl(path: string) {
+  if (!import.meta.env.DEV && !API_ORIGIN) {
+    throw new Error('Production API is not configured. Set VITE_API_URL in Vercel and redeploy.');
+  }
+  return `${API}${path}`;
+}
+
+export function getSocketUrl() {
+  if (import.meta.env.DEV) return '/';
+  if (!API_ORIGIN) {
+    throw new Error('Production API is not configured. Set VITE_API_URL in Vercel and redeploy.');
+  }
+  return import.meta.env.VITE_SOCKET_URL?.trim().replace(/\/+$/, '') || API_ORIGIN;
+}
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -11,7 +27,7 @@ export function setToken(token: string) {
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
-  const response = await fetch(`${API}${path}`, {
+  const response = await fetch(apiUrl(path), {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -29,7 +45,7 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 
 export async function downloadResults(format: 'json' | 'csv', roomCode: string) {
   const token = getToken();
-  const response = await fetch(`${API}/results/${format}`, {
+  const response = await fetch(apiUrl(`/results/${format}`), {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!response.ok) {
