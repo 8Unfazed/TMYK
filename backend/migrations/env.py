@@ -3,13 +3,17 @@ import os
 from dotenv import load_dotenv
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 from app.models import Base
 
 config = context.config
 load_dotenv()
 if config.config_file_name:
     fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url")))
+database_url = make_url(os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url")))
+if database_url.drivername in ("postgres", "postgresql"):
+    database_url = database_url.set(drivername="postgresql+psycopg")
+config.set_main_option("sqlalchemy.url", database_url.render_as_string(hide_password=False).replace("%", "%%"))
 target_metadata = Base.metadata
 
 def run_migrations_offline():
