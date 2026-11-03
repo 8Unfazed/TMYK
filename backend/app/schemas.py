@@ -1,7 +1,9 @@
+from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 class CreateRoom(BaseModel):
     name: str = Field(min_length=1, max_length=24)
+    game_mode: Literal["CLASSIC", "FULL_EXPERIENCE_8"] = "CLASSIC"
 
     @field_validator("name")
     @classmethod
@@ -21,6 +23,9 @@ class JoinRoom(CreateRoom):
 
 class ReadyRequest(BaseModel):
     ready: bool
+
+class RoundDurationRequest(BaseModel):
+    duration_seconds: Literal[30, 60, 90, 120]
 
 class DraftRequest(BaseModel):
     subject_id: str
@@ -45,16 +50,16 @@ class GuessRequest(BaseModel):
 class ContinueRequest(BaseModel):
     expected_version: int | None = None
 
-class TiebreakerClue(BaseModel):
-    text: str = Field(max_length=250)
+class TiebreakerDescriptions(BaseModel):
+    descriptions: dict[str, str]
 
-    @field_validator("text")
+    @field_validator("descriptions")
     @classmethod
     def clean_text(cls, value):
-        value = value.strip()
-        if not value:
-            raise ValueError("Clue cannot be blank")
-        return value
+        cleaned = {subject_id: text.strip() for subject_id, text in value.items()}
+        if any(not text or len(text) > 250 for text in cleaned.values()):
+            raise ValueError("Each description must contain 1 to 250 characters")
+        return cleaned
 
 class TiebreakerGuessRequest(BaseModel):
     prompt_id: str

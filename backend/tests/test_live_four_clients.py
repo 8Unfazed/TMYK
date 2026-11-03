@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import os
 import socket
 
@@ -10,7 +11,9 @@ import uvicorn
 def test_four_live_clients_complete_twelve_description_game(tmp_path):
     os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path / 'live.db'}"
     os.environ["APP_SECRET"] = "test-secret-for-live-integration"
-    from app.main import asgi_app
+    importlib.reload(importlib.import_module("app.db"))
+    main = importlib.reload(importlib.import_module("app.main"))
+    asgi_app = main.asgi_app
 
     async def run_game():
         with socket.socket() as probe:
@@ -144,11 +147,24 @@ def test_four_live_clients_complete_twelve_description_game(tmp_path):
                 main_scores = {player["id"]: player["total"] for player in final["leaderboard"]}
                 started = await http.post("/api/tiebreaker/start", headers=headers(0))
                 assert started.status_code == 200, started.text
-                clue_authors = {}
+                description_authors = {}
                 for index in range(4):
-                    clue_text = f"A new clue in player {index + 1}'s own voice."
-                    clue_authors[clue_text] = records[index]["state"]["me"]["id"]
-                    response = await http.post("/api/tiebreaker/clue", json={"text": clue_text}, headers=headers(index))
+                    author_id = records[index]["state"]["me"]["id"]
+                    entries = {
+                        records[subject_index]["state"]["me"]["id"]:
+                            f"About player {subject_index + 1}, written by player {index + 1}."
+                        for subject_index in range(4)
+                        if subject_index != index
+                    }
+                    description_authors.update({
+                        text: (author_id, subject_id)
+                        for subject_id, text in entries.items()
+                    })
+                    response = await http.post(
+                        "/api/tiebreaker/descriptions",
+                        json={"descriptions": entries},
+                        headers=headers(index),
+                    )
                     assert response.status_code == 200, response.text
                 tiebreaker_resolved = 0
                 while True:
@@ -158,18 +174,13 @@ def test_four_live_clients_complete_twelve_description_game(tmp_path):
                     assert tie_state["phase"] == "TIEBREAKER"
                     assert tie_state["tie_stage"] == "GUESSING"
                     active_tie = tie_state["active_tiebreaker"]
-                    clue = active_tie["text"]
-                    if not clue:
-                        for index in range(1, 4):
-                            candidate = (await http.get("/api/state", headers=headers(index))).json()["active_tiebreaker"]
-                            if candidate and candidate["text"]:
-                                clue = candidate["text"]
-                                break
-                    author_id = clue_authors[clue]
+                    author_id, subject_id = description_authors[active_tie["text"]]
+                    assert active_tie["subject_id"] == subject_id
                     author_index = next(index for index, record in enumerate(records) if record["state"]["me"]["id"] == author_id)
                     author_view = (await http.get("/api/state", headers=headers(author_index))).json()["active_tiebreaker"]
                     assert author_view["is_author"] is True
-                    assert author_view["text"] is None
+                    assert author_view["text"] == active_tie["text"]
+                    assert author_view["author_id"] is None
                     for guesser_index, record in enumerate(records):
                         if record["state"]["me"]["id"] == author_id:
                             continue
@@ -181,16 +192,17 @@ def test_four_live_clients_complete_twelve_description_game(tmp_path):
                     reveal = (await http.get("/api/state", headers=headers(0))).json()
                     assert reveal["tie_stage"] == "REVEAL"
                     assert len(reveal["active_tiebreaker"]["guesses"]) == 3
+                    assert reveal["active_tiebreaker"]["author_id"] == author_id
                     tiebreaker_resolved += 1
                     response = await http.post("/api/tiebreaker/continue", json={"expected_version": reveal["version"]}, headers=headers(0))
                     assert response.status_code == 200, response.text
                 final = (await http.get("/api/state", headers=headers(0))).json()
-                assert tiebreaker_resolved == 4
+                assert tiebreaker_resolved == 12
                 assert final["tie_completed"] is True
-                assert len(final["tiebreaker_prompts"]) == 4
-                assert sum(len(prompt["guesses"]) for prompt in final["tiebreaker_prompts"]) == 12
+                assert len(final["tiebreaker_prompts"]) == 12
+                assert sum(len(prompt["guesses"]) for prompt in final["tiebreaker_prompts"]) == 36
                 assert {player["id"]: player["total"] for player in final["leaderboard"]} == main_scores
-                assert all(player["tiebreaker_points"] == 3 for player in final["leaderboard"])
+                assert all(player["tiebreaker_points"] == 9 for player in final["leaderboard"])
                 assert len(final["winners"]) == 4
                 results_response = await http.get("/api/results/json", headers=headers(1))
                 assert results_response.status_code == 200

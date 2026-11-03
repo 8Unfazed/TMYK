@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 def now():
@@ -13,13 +13,18 @@ class Game(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     code: Mapped[str] = mapped_column(String(8), unique=True, index=True)
     phase: Mapped[str] = mapped_column(String(16), default="LOBBY", nullable=False)
+    game_mode: Mapped[str] = mapped_column(String(32), default="CLASSIC", nullable=False)
     host_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     active_description_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     tie_accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     tie_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
     active_tiebreaker_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     tie_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    tie_participant_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    round_duration_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    round_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    round_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -63,14 +68,16 @@ class Guess(Base):
     subject_guess_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     author_points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     subject_points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    timed_out: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, nullable=False)
 
 class TiebreakerPrompt(Base):
     __tablename__ = "tiebreaker_prompts"
-    __table_args__ = (UniqueConstraint("game_id", "author_id", name="uq_tiebreaker_author"),)
+    __table_args__ = (UniqueConstraint("game_id", "author_id", "subject_id", name="uq_tiebreaker_author_subject"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     game_id: Mapped[str] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
     author_id: Mapped[str] = mapped_column(ForeignKey("players.id"))
+    subject_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     text: Mapped[str] = mapped_column(String(250), nullable=False)
     sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -83,6 +90,7 @@ class TiebreakerGuess(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     prompt_id: Mapped[str] = mapped_column(ForeignKey("tiebreaker_prompts.id", ondelete="CASCADE"), index=True)
     guesser_id: Mapped[str] = mapped_column(ForeignKey("players.id"))
-    author_guess_id: Mapped[str] = mapped_column(ForeignKey("players.id"), nullable=False)
+    author_guess_id: Mapped[str | None] = mapped_column(ForeignKey("players.id"), nullable=True)
     points: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    timed_out: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, nullable=False)

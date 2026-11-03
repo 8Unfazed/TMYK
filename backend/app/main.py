@@ -1,24 +1,72 @@
+import asyncio
+import logging
 import os
 import time
+import json
+from contextlib import asynccontextmanager, suppress
 from collections import defaultdict, deque
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-import json
 import socketio
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from .db import SessionLocal, engine, get_db
+from .db import DATABASE_URL, SessionLocal, engine, get_db
 from .models import Base, Player
 from . import schemas, service
 
-Base.metadata.create_all(bind=engine)
-api = FastAPI(title="Fourfold API", version="1.0.0")
+if DATABASE_URL.startswith("sqlite"):
+    Base.metadata.create_all(bind=engine)
+api = FastAPI(title="TMYK API", version="1.0.0")
 origins = [origin.strip() for origin in os.getenv("FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
+if not DATABASE_URL.startswith("sqlite"):
+    if not os.getenv("APP_SECRET") or len(os.environ["APP_SECRET"]) < 32 or os.environ["APP_SECRET"] == "development-only-change-this-secret":
+        raise RuntimeError("Set APP_SECRET to a unique random value of at least 32 characters")
+    if not os.getenv("FRONTEND_ORIGINS") or not origins or "*" in origins:
+        raise RuntimeError("Set FRONTEND_ORIGINS to the exact trusted HTTPS frontend origin(s)")
+    if any(not origin.startswith("https://") for origin in origins):
+        raise RuntimeError("Production FRONTEND_ORIGINS entries must use HTTPS")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    db = SessionLocal()
+    try:
+        service.reset_stale_connections(db)
+    finally:
+        db.close()
+    timer_task = asyncio.create_task(_round_timer_loop())
+    try:
+        yield
+    finally:
+        timer_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await timer_task
+
+
+api = FastAPI(title="TMYK API", version="1.0.0", lifespan=lifespan)
 api.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=origins, logger=False, engineio_logger=False)
 asgi_app = socketio.ASGIApp(sio, other_asgi_app=api)
 sid_players: dict[str, str] = {}
 rate_buckets: dict[str, deque] = defaultdict(deque)
+logger = logging.getLogger(__name__)
+
+
+async def _round_timer_loop():
+    while True:
+        db = SessionLocal()
+        try:
+            expired_games = service.expire_due_rounds(db)
+        except Exception:
+            logger.exception("Could not process expired game rounds")
+            expired_games = []
+        finally:
+            db.close()
+        for game_id in expired_games:
+            await broadcast_game(game_id)
+            await sio.emit("round_expired", {"game_id": game_id}, room=f"game:{game_id}")
+        await asyncio.sleep(0.5)
+
 
 def _limit(request: Request, key: str, maximum: int, period: int = 60):
     bucket = rate_buckets[f"{request.client.host if request.client else 'unknown'}:{key}"]
@@ -54,13 +102,17 @@ async def broadcast_game(game_id: str):
             await sio.emit("room:state", payload, to=sid)
 
 @api.get("/api/health")
-def health():
+def health(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Service dependencies are unavailable")
     return {"status": "ok"}
 
 @api.post("/api/rooms")
 async def create_room(body: schemas.CreateRoom, request: Request, db: Session = Depends(get_db)):
     _limit(request, "create", 5)
-    result = service.create_room(db, body.name)
+    result = service.create_room(db, body.name, body.game_mode)
     player = service.get_player(db, result["token"])
     result["state"] = service.snapshot(db, player)
     return result
@@ -127,6 +179,12 @@ async def start(player: Player = Depends(current_player), db: Session = Depends(
     await broadcast_game(player.game_id)
     return service.snapshot(db, player)
 
+@api.post("/api/round-duration")
+async def set_round_duration(body: schemas.RoundDurationRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
+    service.set_round_duration(db, player, body.duration_seconds)
+    await broadcast_game(player.game_id)
+    return service.snapshot(db, player)
+
 @api.post("/api/descriptions/draft")
 async def draft(body: schemas.DraftRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
     service.save_draft(db, player, body.subject_id, body.text)
@@ -136,11 +194,26 @@ async def draft(body: schemas.DraftRequest, player: Player = Depends(current_pla
 async def submit_descriptions(body: schemas.SubmitDescriptions, player: Player = Depends(current_player), db: Session = Depends(get_db)):
     service.submit_descriptions(db, player, body.descriptions)
     await broadcast_game(player.game_id)
-    return service.snapshot(db, player)
+    state = service.snapshot(db, player)
+    if state["phase"] == "GUESSING" and state["round_deadline"]:
+        await sio.emit("round_started", {
+            "round_id": state["active_description_id"],
+            "description_index": state["active_description"]["sequence"],
+            "started_at": state["round_started_at"],
+            "deadline": state["round_deadline"],
+            "duration_seconds": state["round_duration_seconds"],
+        }, room=f"game:{player.game_id}")
+    return state
 
 @api.post("/api/guesses")
 async def guess(body: schemas.GuessRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
-    service.submit_guess(db, player, body.description_id, body.author_guess_id, body.subject_guess_id)
+    try:
+        service.submit_guess(db, player, body.description_id, body.author_guess_id, body.subject_guess_id)
+    except HTTPException as error:
+        if error.detail == "The time for this description has expired":
+            await broadcast_game(player.game_id)
+            await sio.emit("round_expired", {"game_id": player.game_id, "round_id": body.description_id}, room=f"game:{player.game_id}")
+        raise
     await broadcast_game(player.game_id)
     return service.snapshot(db, player)
 
@@ -148,7 +221,16 @@ async def guess(body: schemas.GuessRequest, player: Player = Depends(current_pla
 async def continue_game(body: schemas.ContinueRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
     service.continue_game(db, player, body.expected_version)
     await broadcast_game(player.game_id)
-    return service.snapshot(db, player)
+    state = service.snapshot(db, player)
+    if state["phase"] == "GUESSING" and state["round_deadline"]:
+        await sio.emit("round_started", {
+            "round_id": state["active_description_id"],
+            "description_index": state["active_description"]["sequence"],
+            "started_at": state["round_started_at"],
+            "deadline": state["round_deadline"],
+            "duration_seconds": state["round_duration_seconds"],
+        }, room=f"game:{player.game_id}")
+    return state
 
 @api.post("/api/cancel")
 async def cancel(player: Player = Depends(current_player), db: Session = Depends(get_db)):
@@ -168,15 +250,31 @@ async def start_tiebreaker(player: Player = Depends(current_player), db: Session
     await broadcast_game(player.game_id)
     return service.snapshot(db, player)
 
-@api.post("/api/tiebreaker/clue")
-async def submit_tiebreaker_clue(body: schemas.TiebreakerClue, player: Player = Depends(current_player), db: Session = Depends(get_db)):
-    service.submit_tiebreaker_clue(db, player, body.text)
+@api.post("/api/tiebreaker/descriptions")
+async def submit_tiebreaker_descriptions(body: schemas.TiebreakerDescriptions, player: Player = Depends(current_player), db: Session = Depends(get_db)):
+    service.submit_tiebreaker_descriptions(db, player, body.descriptions)
     await broadcast_game(player.game_id)
-    return service.snapshot(db, player)
+    state = service.snapshot(db, player)
+    if state["phase"] == "TIEBREAKER" and state["tie_stage"] == "GUESSING" and state["round_deadline"]:
+        await sio.emit("round_started", {
+            "round_id": state["active_tiebreaker"]["id"],
+            "description_index": state["active_tiebreaker"]["sequence"],
+            "started_at": state["round_started_at"],
+            "deadline": state["round_deadline"],
+            "duration_seconds": state["round_duration_seconds"],
+            "round_type": "tiebreaker",
+        }, room=f"game:{player.game_id}")
+    return state
 
 @api.post("/api/tiebreaker/guess")
 async def submit_tiebreaker_guess(body: schemas.TiebreakerGuessRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
-    service.submit_tiebreaker_guess(db, player, body.prompt_id, body.author_guess_id)
+    try:
+        service.submit_tiebreaker_guess(db, player, body.prompt_id, body.author_guess_id)
+    except HTTPException as error:
+        if error.detail == "The time for this tiebreaker description has expired":
+            await broadcast_game(player.game_id)
+            await sio.emit("round_expired", {"game_id": player.game_id, "round_id": body.prompt_id}, room=f"game:{player.game_id}")
+        raise
     await broadcast_game(player.game_id)
     return service.snapshot(db, player)
 
@@ -184,7 +282,17 @@ async def submit_tiebreaker_guess(body: schemas.TiebreakerGuessRequest, player: 
 async def continue_tiebreaker(body: schemas.ContinueRequest, player: Player = Depends(current_player), db: Session = Depends(get_db)):
     service.continue_tiebreaker(db, player, body.expected_version)
     await broadcast_game(player.game_id)
-    return service.snapshot(db, player)
+    state = service.snapshot(db, player)
+    if state["phase"] == "TIEBREAKER" and state["tie_stage"] == "GUESSING" and state["round_deadline"]:
+        await sio.emit("round_started", {
+            "round_id": state["active_tiebreaker"]["id"],
+            "description_index": state["active_tiebreaker"]["sequence"],
+            "started_at": state["round_started_at"],
+            "deadline": state["round_deadline"],
+            "duration_seconds": state["round_duration_seconds"],
+            "round_type": "tiebreaker",
+        }, room=f"game:{player.game_id}")
+    return state
 
 @api.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException):

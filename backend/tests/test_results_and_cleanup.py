@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app import service
+from app.db import normalize_database_url
 from app.models import Base, Description, Game, Guess, Player, TiebreakerGuess, TiebreakerPrompt
 
 
@@ -33,6 +34,20 @@ def make_room(db, suffix=""):
         players.append(service.get_player(db, joined["token"]))
         tokens.append(joined["token"])
     return created, players, tokens
+
+
+def test_postgres_urls_use_installed_psycopg_driver():
+    assert normalize_database_url("postgres://user:password@db.example/game") == "postgresql+psycopg://user:password@db.example/game"
+    assert normalize_database_url("postgresql://user:password@db.example/game") == "postgresql+psycopg://user:password@db.example/game"
+
+
+def test_restart_marks_stale_sockets_offline_and_host_can_be_reassigned(db):
+    _, players, _ = make_room(db)
+    service.reset_stale_connections(db)
+    assert all(not player.connected for player in players)
+
+    service.mark_connected(db, players[1], True)
+    assert db.get(Game, players[0].game_id).host_id == players[1].id
 
 
 def finish_match(db, players):
@@ -81,14 +96,15 @@ def test_export_includes_tiebreaker_results(db):
     _, players, _ = make_room(db)
     finish_match(db, players)
     game = db.get(Game, players[0].game_id)
-    prompt = TiebreakerPrompt(id="tie-prompt", game_id=game.id, author_id=players[0].id, text="Clue, with a comma", sequence=0, resolved=True)
+    prompt = TiebreakerPrompt(id="tie-prompt", game_id=game.id, author_id=players[0].id, subject_id=players[2].id, text="Description, with a comma", sequence=0, resolved=True)
     db.add(prompt)
     db.flush()
     db.add(TiebreakerGuess(id="tie-guess", prompt_id=prompt.id, guesser_id=players[1].id, author_guess_id=players[0].id, points=1))
     db.commit()
 
     results = service.results_data(db, players[0])
-    assert results["tiebreaker_results"][0]["clue"] == "Clue, with a comma"
+    assert results["tiebreaker_results"][0]["description"] == "Description, with a comma"
+    assert results["tiebreaker_results"][0]["subject"]["display_name"] == players[2].name
     assert results["tiebreaker_results"][0]["guesses"][0]["points"] == 1
 
 
