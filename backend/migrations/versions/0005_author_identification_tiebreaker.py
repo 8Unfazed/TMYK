@@ -2,7 +2,7 @@
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0005_author_identification_tiebreaker"
+revision = "0005_tie_author_subject"
 down_revision = "0004_game_modes"
 branch_labels = None
 depends_on = None
