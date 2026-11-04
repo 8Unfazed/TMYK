@@ -302,6 +302,9 @@ def submit_guess(db: Session, player: Player, description_id: str, author_guess_
     description = db.get(Description, description_id)
     if game.phase != "GUESSING" or description is None or description.id != game.active_description_id or description.game_id != game.id:
         fail(409, "This is not the active guessing turn")
+    members = {member.id for member in _members(db, game.id)}
+    if player.id not in members:
+        fail(403, "You are not a player in this room")
     if game.round_deadline and now() >= game.round_deadline:
         _expire_round(db, game, now())
         fail(409, "The time for this description has expired")
@@ -309,17 +312,10 @@ def submit_guess(db: Session, player: Player, description_id: str, author_guess_
         fail(403, "This description is not available to you")
     if author_guess_id is None and subject_guess_id is None:
         fail(400, "Choose at least one category")
-    members = {member.id for member in _members(db, game.id)}
     if any(value is not None and value not in members for value in (author_guess_id, subject_guess_id)):
         fail(400, "Guesses must be players in this room")
-    if game.game_mode == FULL_EXPERIENCE_MODE and player.id in (author_guess_id, subject_guess_id):
-        fail(400, "You cannot guess yourself as the author or subject")
-    if (
-        game.game_mode == FULL_EXPERIENCE_MODE
-        and author_guess_id is not None
-        and author_guess_id == subject_guess_id
-    ):
-        fail(400, "The author and subject guesses must be different players")
+    if game.game_mode == FULL_EXPERIENCE_MODE and author_guess_id == player.id:
+        fail(400, "You cannot guess yourself as the author")
     if db.scalar(select(Guess.id).where(Guess.description_id == description.id, Guess.guesser_id == player.id)):
         fail(409, "Your guess is already locked")
     db.add(Guess(id=new_id(), description_id=description.id, guesser_id=player.id, author_guess_id=author_guess_id, subject_guess_id=subject_guess_id))

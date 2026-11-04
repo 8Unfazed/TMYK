@@ -355,7 +355,9 @@ export function Guessing({ state, act, onError }: {
   const active = state.active_description;
   const isAuthor = active?.is_author;
   const fullExperience = state.game_mode === 'FULL_EXPERIENCE_8';
-  const guesserOptions = fullExperience ? state.players.filter((player) => player.id !== state.me.id) : state.players;
+  const authorOptions = fullExperience
+    ? state.players.filter((player) => player.id !== state.me.id)
+    : state.players;
   const [author, setAuthor] = useState<string | null>(null);
   const [subject, setSubject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -389,14 +391,8 @@ export function Guessing({ state, act, onError }: {
   const handleGuessLockError = (reason: unknown) => {
     onError(reason instanceof Error ? reason.message : 'Could not lock your guess. Please try again.');
   };
-  const selectAuthor = (id: string) => {
-    setAuthor(id);
-    if (fullExperience && id && id === subject) setSubject(null);
-  };
-  const selectSubject = (id: string) => {
-    setSubject(id);
-    if (fullExperience && id && id === author) setAuthor(null);
-  };
+  const selectAuthor = (id: string) => setAuthor(id);
+  const selectSubject = (id: string) => setSubject(id);
   if (!active) return <section className="phase-panel"><LoaderCircle className="spin" /><h2>Finding the next card…</h2></section>;
   if (isAuthor) return <section className="phase-layout"><div className="phase-intro"><span className="eyebrow">ROUND TWO · GUESS</span><h1>Your turn to<br /><em>sit this one out.</em></h1></div><div className="phase-card waiting-state"><RoundTimer deadline={state.round_deadline} serverNow={state.server_now} duration={state.round_duration_seconds} /><span className="big-icon"><Eye /></span><h2>Let the others wonder.</h2><p>Everyone else is trying to figure this one out. You’ll see the reveal when their guesses are locked.</p><div className="progress-track"><i style={{ width: `${(state.progress.guess_submitted / state.progress.guess_required) * 100}%` }} /></div><small>{state.progress.guess_submitted} of {state.progress.guess_required} guesses submitted</small></div></section>;
   const guessed = Boolean(state.my_guess);
@@ -411,10 +407,10 @@ export function Guessing({ state, act, onError }: {
       {guessed && <div className="waiting-state compact"><span className="big-icon"><LockKeyhole /></span><h2>Your guess is in.</h2><p>It’s locked away until everyone has made their call.</p><div className="progress-track"><i style={{ width: `${(state.progress.guess_submitted / state.progress.guess_required) * 100}%` }} /></div></div>}
       {!guessed && <>
           <div className="guess-category"><div className="category-title"><span className="category-icon author-icon">✍</span><div><strong>Who wrote it?</strong><small>AUTHOR · 8 POINTS</small></div><button type="button" className="skip-button" disabled={busy} onClick={() => setAuthor(null)} aria-label="Skip author guess">Skip</button></div>
-            <PlayerCards players={guesserOptions} selected={author} onSelect={selectAuthor} disabled={busy} label="Choose the author" />
+            <PlayerCards players={authorOptions} selected={author} onSelect={selectAuthor} disabled={busy} label="Choose the author" />
           </div>
           <div className="guess-category"><div className="category-title"><span className="category-icon subject-icon">◎</span><div><strong>Who is it about?</strong><small>SUBJECT · 5 POINTS</small></div><button type="button" className="skip-button" disabled={busy} onClick={() => setSubject(null)} aria-label="Skip subject guess">Skip</button></div>
-            <PlayerCards players={guesserOptions} selected={subject} onSelect={selectSubject} disabled={busy} label="Choose the subject" />
+            <PlayerCards players={state.players} selected={subject} onSelect={selectSubject} disabled={busy} label="Choose the subject" />
           </div>
         </>}
       <div className="guess-footer">

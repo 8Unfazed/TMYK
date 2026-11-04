@@ -378,38 +378,44 @@ def test_full_experience_generates_dynamic_descriptions_and_eligible_guesses(db,
     with pytest.raises(HTTPException) as self_guess:
         service.submit_guess(db, guessers[0], description.id, guessers[0].id, None)
     assert self_guess.value.status_code == 400
-    with pytest.raises(HTTPException) as self_subject:
-        service.submit_guess(db, guessers[0], description.id, None, guessers[0].id)
-    assert self_subject.value.status_code == 400
-    with pytest.raises(HTTPException) as same_guess:
-        service.submit_guess(db, guessers[0], description.id, guessers[1].id, guessers[1].id)
-    assert same_guess.value.status_code == 400
     with pytest.raises(HTTPException) as unknown_player:
         service.submit_guess(db, guessers[0], description.id, "not-a-room-player", None)
     assert unknown_player.value.status_code == 400
+    with pytest.raises(HTTPException) as unknown_subject:
+        service.submit_guess(db, guessers[0], description.id, None, "not-a-room-player")
+    assert unknown_subject.value.status_code == 400
+    outsider = Player(id="outsider", game_id=game.id, number=player_count + 1, name="Outsider", token_hash="outsider-token")
+    with pytest.raises(HTTPException) as non_member:
+        service.submit_guess(db, outsider, description.id, None, players[0].id)
+    assert non_member.value.status_code == 403
     with pytest.raises(HTTPException) as author_guess:
         service.submit_guess(db, next(player for player in players if player.id == description.author_id), description.id, None, description.subject_id)
     assert author_guess.value.status_code == 403
 
-    author_guesser = guessers[0]
-    subject_guesser = next(
+    author_guesser = next(player for player in guessers if player.id != description.subject_id)
+    writer_subject_guesser = next(player for player in guessers if player.id != author_guesser.id)
+    correct_subject_guesser = next(
         player for player in guessers
-        if player.id not in (description.subject_id, author_guesser.id)
+        if player.id not in (author_guesser.id, writer_subject_guesser.id)
     )
-    service.submit_guess(db, author_guesser, description.id, description.author_id, None)
-    service.submit_guess(db, subject_guesser, description.id, None, description.subject_id)
+    service.submit_guess(db, author_guesser, description.id, description.author_id, author_guesser.id)
+    with pytest.raises(HTTPException) as locked_guess:
+        service.submit_guess(db, author_guesser, description.id, None, players[0].id)
+    assert locked_guess.value.status_code == 409
+    service.submit_guess(db, writer_subject_guesser, description.id, description.author_id, description.author_id)
+    service.submit_guess(db, correct_subject_guesser, description.id, None, description.subject_id)
     for guesser in guessers:
-        if guesser.id in (author_guesser.id, subject_guesser.id):
+        if guesser.id in (author_guesser.id, writer_subject_guesser.id, correct_subject_guesser.id):
             continue
         wrong_author = next(player.id for player in players if player.id not in (guesser.id, description.author_id))
-        wrong_subject = next(player.id for player in players if player.id not in (guesser.id, description.subject_id, wrong_author))
-        service.submit_guess(db, guesser, description.id, wrong_author, wrong_subject)
+        service.submit_guess(db, guesser, description.id, wrong_author, guesser.id)
     assert game.phase == "REVEAL"
     guesses = list(db.scalars(select(Guess).where(Guess.description_id == description.id)))
     assert len(guesses) == player_count - 1
     by_guesser = {guess.guesser_id: guess for guess in guesses}
     assert (by_guesser[author_guesser.id].author_points, by_guesser[author_guesser.id].subject_points) == (8, 0)
-    assert (by_guesser[subject_guesser.id].author_points, by_guesser[subject_guesser.id].subject_points) == (0, 5)
+    assert (by_guesser[writer_subject_guesser.id].author_points, by_guesser[writer_subject_guesser.id].subject_points) == (8, 0)
+    assert (by_guesser[correct_subject_guesser.id].author_points, by_guesser[correct_subject_guesser.id].subject_points) == (0, 5)
     with pytest.raises(HTTPException) as duplicate:
         service.submit_guess(db, guessers[0], description.id, description.author_id, None)
     assert duplicate.value.status_code == 409

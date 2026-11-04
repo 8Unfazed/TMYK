@@ -195,6 +195,14 @@ describe('landing page', () => {
     expect(authors.getAllByRole('button')).toHaveLength(4);
     expect(authors.queryByRole('button', { name: /Host/ })).not.toBeInTheDocument();
     expect(authors.getByRole('button', { name: /Fifth/ })).toBeInTheDocument();
+    const subjects = within(screen.getByRole('group', { name: 'Choose the subject' }));
+    expect(subjects.getAllByRole('button')).toHaveLength(5);
+    expect(subjects.getByRole('button', { name: /Host/ })).toBeInTheDocument();
+    expect(subjects.getByRole('button', { name: /Writer/ })).toBeInTheDocument();
+    fireEvent.click(authors.getByRole('button', { name: /Fifth/ }));
+    fireEvent.click(subjects.getByRole('button', { name: /Fifth/ }));
+    expect(authors.getByRole('button', { name: /Fifth/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(subjects.getByRole('button', { name: /Fifth/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('submits one valid guess only after the slider is completed', async () => {
